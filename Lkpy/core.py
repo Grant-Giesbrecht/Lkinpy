@@ -1,15 +1,14 @@
 from colorama import Fore, Style
-import numpy as np
-from scipy.fft import fft, fftfreq
-import pickle
-
 from base import *
 
-import copy
 import logging
 import getopt, sys
-from dataclasses import dataclass
-import math
+import git
+
+from Simulator_ABCD import *
+from Simulator_ABCDv1 import *
+from Simulator_P0 import *
+from Simulator_Hybrid import *
 
 addLoggingLevel('MAIN', logging.INFO + 5)
 
@@ -39,98 +38,33 @@ for opt, aarg in opts:
 	# ...
 #-----------------------------------------------------------
 
-tabchar = "    "
-prime_color = Fore.YELLOW
-standard_color = Fore.LIGHTBLACK_EX
-quiet_color = Fore.WHITE
-cspecial = Fore.GREEN # COlor used to highlight content inside logging messages
 logging.basicConfig(format=f'{prime_color}%(levelname)s:{standard_color} %(message)s{quiet_color} | %(asctime)s{Style.RESET_ALL}', level=LOG_LEVEL)
 
-PI = 3.1415926535
+#print git version
+repo = git.Repo(search_parent_directories=True)
+sha = repo.head.object.hexsha
+sha_short = sha[:12]
+logging.info(f"Initializing simulator. {Fore.LIGHTBLACK_EX}[Active Branch: {Fore.LIGHTBLUE_EX}{repo.active_branch}{Fore.LIGHTBLACK_EX}, commit={Fore.LIGHTBLUE_EX}0x{sha_short}{Fore.LIGHTBLACK_EX}]{Style.RESET_ALL}")
 
-# Starting Iac guess options
-GUESS_ZERO_REFLECTION = 1
-GUESS_USE_LAST = 2
 
-@dataclass
 class Simopt:
-	""" Contains simulation options"""
 	
-	# Simulation options
-	use_interp = False # This option allows FFT interpolation, but ***has NOT been implemented***
-	use_S21_loss = True # This option interprets S21 data to determine system loss and incorporates it in the converging simulation
-	use_Lk_expansion = False # This option calculates Lk from the standard I^2 approx as opposed to including all terms. Note: this option must be FALSE to include tickle. Only included because it was used in the original simulations
-	
-	# Convergence options
-	max_iter = 1000 # Max iterations for convergence
-	tol_pcnt = 1 # Tolerance in percent between Iac guesses
-	guess_update_coef = 0.5 # Fraction by which to compromise between guess and result Iac (0=remain at guess, 1=use result; 0.5 recommended)
-	ceof_shrink_factor = 0.2 # Fraction by which to modify guess_update_coef when sign reverses (good starting point: 0.2)
-	
-	# How to pick initial Iac guess
-	start_guess_method = GUESS_ZERO_REFLECTION
-	
-	# Data Save Options
-	remove_td = False # Prevents all time domain data from being saved in solution data to save space
-
-@dataclass
-class LKSolution:
-	""" Contains data to represent a solution to the LKsystem problem"""
-	
-	Lk = None
-	
-	Vp = None # Not actually used
-	betaL = None # Electrical length of chip in radians
-	P0 = None
-	theta = None # TODO: not saved
-	Iac = None
-	Ibias = None
-	Zin = None # Impedance looking into chip (from source side)
-	
-	L_ = None # From Lk
-	Zchip = None # From L_, characteristic impedance of chip
-	
-	Iac_result_rms = None # Magnitude of Iac
-	Iac_result_td = None # Use Iac to find solution and calculate Iac again, this is the result in time domain
-	Iac_result_spec = None # Iac result as spectrum, shows fundamental, 2harm, and 3harm as touple (idx 0 = fund, ..., 2 = 3rd harm)
-	rmse = None # |Iac_result - Iac|
-	
-	convergence_failure = None # Set as True if fails to converge
-	num_iter = None # Number of iterations completed
-
-	spec = None # Spectrum data [AC Current amplitude in Amps]
-	spec_freqs = None # Spectrum frequencies in Hz
-
-def rd(x:float, num_decimals:int=2):
-	return f"{round(x*10**num_decimals)/(10**num_decimals)}"
-
-def find_nearest(array,value):
-	""" Finds closest value.
-	
-	Thanks to StackExchange:
-	https://stackoverflow.com/questions/2566412/find-nearest-value-in-numpy-array
-	"""
-	idx = np.searchsorted(array, value, side="left")
-	if idx > 0 and (idx == len(array) or math.fabs(value - array[idx-1]) < math.fabs(value - array[idx])):
-		return idx-1
-	else:
-		return idx
-
-def xfmr(Z0, ZL, betaL):
-	""" Calculates the input impedance looking into a transformer with characteristic 
-	impedance Z0, terminated in load ZL, and electrical length betaL (radians)"""
-	return Z0 * (ZL + 1j*Z0*np.tan(betaL))/(Z0 + 1j*ZL*np.tan(betaL))
+	# Simulation class to use
+	simulator = SIMULATOR_ABCD
 
 class LKSystem:
-	""" This class represents a solution to the nonlinear chip system, give a set of input conditions (things
-	like actual chip length, input power, etc)."""
 	
-	def __init__(self, Pgen_dBm:float, C_:float, l_phys:float, freq:float, q:float, L0:float):
-		""" Initialize system with given conditions """
+	# Parameters to calculate from solution data
+	CPARAM_CONVERSION_EFFIC1 = 1
+	CPARAM_CONVERSION_EFFIC2 = 2
+	CPARAM_TOTAL_LOAD_POWER  = 3
+	CPARAM_HARM_LOAD_POWER   = 4
+	
+	def __init__(self, Pgen_dBm:float, C_:float, l_phys:float, freq:float, q:float, L0:float, max_harm:int=6, ZL=50, Zg=50):
 		
 		# Simulations options
 		self.opt = Simopt()
-
+		
 		# System Settings
 		self.Pgen = (10**(Pgen_dBm/10))/1000
 		self.C_ = C_
@@ -139,25 +73,33 @@ class LKSystem:
 		self.q = q
 		self.L0 = L0
 		self.Zcable = 50 # Z0 of cable leading into chip
-		self.Rsrc = 50 # R of generator
-		self.Xsrc = 0 # X of generator
-		self.Vgen  = np.sqrt(self.Pgen*200) # Solve for Generator voltage from power
+		self.ZL = ZL # Impedance of load
+		self.Zg = Zg # Impedance of generator
+		self.Vgen = np.sqrt(self.Pgen*200) # Solve for Generator voltage from power
+		self.max_harm = max_harm # Harmonic number to go up to in spectral domain (plus DC)
 		self.system_loss = None # Tuple containing system loss at each harmonic (linear scale, not dB)
 		self.Itickle = None # Amplitude (A) of tickle signal (Set to none to exclude tickle)
 		self.freq_tickle = None # Amplitude (A) of tickle signal (Set to none to exclude tickle)
+		self.harms = np.array(range(self.max_harm+1)) # List of harmonic numbers to include in spectral analysis
 		
 		# Time domain options
 		self.num_periods = None
 		self.num_periods_tickle = None # If tickle is included, this may not be none, in which case this will set the t_max time (greatly extending simulation time)
-		self.max_harm = None
+		self.max_harm_td = None
 		self.min_points_per_wave = None
 		self.t = []
-
+		
 		# Create solution object
 		self.soln = LKSolution() # Current solution data
 		
 		self.solution = [] # List of solution data
 		self.bias_points = [] # List of bias values corresponding to solution data
+		
+		self.sim_abcd = LKSimABCD(self)
+		self.sim_abcdv1 = LKSimABCDv1(self)
+		self.sim_p0 = LKSimP0(self)
+		self.sim_hybrid = LKSimHybrid(self, self.sim_abcd, self.sim_p0)
+		self.simulators = [self.sim_abcd, self.sim_p0, self.sim_hybrid, self.sim_abcdv1]
 		
 		self.configure_time_domain(1000, 3, 30)
 	
@@ -165,41 +107,24 @@ class LKSystem:
 		""" This function configures the tickle variables, enabling a tickle signal to be
 		included in the simulation. Current is the amplitude in amps, and freq is in Hz."""
 		
-		self.Itickle = Itickle
-		self.freq_tickle = freq_tickle
-		self.num_periods_tickle = num_periods
+		# Configure the tickle for each simulator
 		
-		# # Reconfigure time domain
-		# self.configure_time_domain(self.num_periods, self.max_harm, self.min_points_per_wave)
+		for sim in self.simulators:
+			sim.configure_tickle(Itickle, freq_tickle, num_periods)
 		
-		logging.info(f"Configured tickle signal with f={cspecial}{len(rd(self.freq_tickle/1e3))}{standard_color} KHz and Iac={cspecial}{rd(Itickle*1e3)}{standard_color} mA.")
-		
-	def configure_time_domain(self, num_periods:float, max_harm:int, min_points_per_wave:int=10):
+	def configure_time_domain(self, num_periods:float, max_harm_td:int, min_points_per_wave:int=10):
 		""" Configures the time domain settings
 		 
 		  num_periods: Minimum number of periods to simulate
-		  max_harm: Number of harmoinics to simulate
+		  max_harm_td: Number of harmoinics to simulate
 		  min_points_per_wave: Minimum number of time points per wavelength (at all frequencies)
 		  
 		"""
 		
-		# Save options
-		self.num_periods = num_periods
-		self.max_harm = max_harm
-		self.min_points_per_wave = min_points_per_wave
+		# Configure time domain for each simulator
 		
-		# Calculate max 
-		if self.num_periods_tickle is None: # Calculate t_max and num_points the standard way
-			t_max = num_periods/self.freq
-			num_points = min_points_per_wave*max_harm*num_periods+1
-		else: # Greatly extend number of points to simulate low-freq tickle accurately
-			t_max = self.num_periods_tickle/self.freq_tickle
-			num_points = min_points_per_wave*int(max_harm*self.freq/self.freq_tickle)*num_periods+1
-		
-		# Create t array
-		self.t = np.linspace(0, t_max, num_points)
-		
-		logging.info(f"Configured time domain with {cspecial}{len(self.t)}{standard_color} points.")
+		for sim in self.simulators:
+			sim.configure_time_domain(num_periods, max_harm_td, min_points_per_wave)
 		
 	def configure_loss(self, file:str=None, sparam_data:dict=None):
 		""" Reads a pkl file with a dictionary containing variables 'freq_Hz' and 'S21_dB'
@@ -207,326 +132,210 @@ class LKSystem:
 		without specifying a filename by using the sparam_data argument.
 		"""
 		
-		# Read file if no data provided
-		if sparam_data is None:
-			
-			# Open File
-			with open(file, 'rb') as fh:
-				sparam_data = pickle.load(fh)
+		# Configure loss for each simulator
 		
-		# Access frequency and S21 data
-		try:
-			freq = sparam_data['freq_Hz']
-			S21 = sparam_data['S21_dB']
-		except:
-			logging.error(f"{Fore.RED}Invalid S-parameter data provided when configuring system loss!{Style.RESET_ALL}")
-			logging.main("Simulating wihtout system loss")
+		for sim in self.simulators:
+			sim.configure_loss(file, sparam_data)
+	
+	def setopt(self, param:str, value):
+		"""Changes a parameter for every simulator."""
+		
+		# List all simulators
+		simulators_ = [s for s in self.simulators]
+		simulators_.append(self)
+		
+		# Iterate over all simulators
+		for sim in simulators_:
+			
+			# Skip simulator if parameter is not present
+			if not hasattr(sim.opt, param):
+				continue
+			
+			# Set value
+			setattr(sim.opt, param, value)
+	
+	def validate_simulator_code(self, sim_id:int):
+		""" Verifies that the code provided indicates a recognized simulator"""
+		
+		if sim_id == SIMULATOR_ABCD:
+			return True
+		
+		if sim_id == SIMULATOR_ABCDV1:
+			return True
+		
+		if sim_id == SIMULATOR_P0:
+			return True
+		
+		if sim_id == SIMULATOR_HYBRID:
+			return True
+		
+		return False
+	
+	def select_simulator(self, sim_id:int):
+		""" Specifies which simulator(s) to use by default. """
+		
+		# Check that valid simulator was provided
+		if not self.validate_simulator_code(sim_id):
+			logging.warning("Unrecognized simulator ID provided.")
 			return
 		
-		# Find indecies
-		f_idx1 = find_nearest(freq, self.freq)
-		f_idx2 = find_nearest(freq, self.freq*2)
-		f_idx3 = find_nearest(freq, self.freq*3)
+		# Update simulator
+		self.opt.simulator = sim_id
+	
+	def solve(self, Ibias_vals:list, simulator:int=None):
+		""" Solve the system at the bias values specified by Ibias_vals.
 		
-		#TODO: add more error checking if data doesn't contain correct or close enoguh frequencies
+		If 'simulator' is specified, this simulator will be used instead of whatever
+		was specified as the default by 'select_simulator()', however it will not modify
+		the default/future function calls.
 		
-		# Convert from dB to linear scaling - dB20 because this will be applied to Iac, not P0
-		loss_Fund = (10**(S21[f_idx1]/20))
-		loss_2H = (10**(S21[f_idx2]/20))
-		loss_3H = (10**(S21[f_idx3]/20))
+		"""
+		# Auto-select simulator
+		use_simulator = self.opt.simulator
+		if simulator is not None:
+			
+			# Verify that a valid simulator was provided
+			if not self.validate_simulator_code(simulator):
+				logging.warning(f"Unrecognized simulator ID provided. Using default: {simcode_to_str(self.opt.simulator)}")
+			else:
+				use_simulator = simulator
 		
-		# Save loss
-		self.system_loss = (loss_Fund, loss_2H, loss_3H)
+		# Check which simulator is selected
+		if use_simulator == SIMULATOR_ABCD:
+			
+			# Specify simulator
+			sim = self.sim_abcd
+			logging.info(f"Beginning solve with simulator: {Fore.LIGHTBLUE_EX}{sim.NAME}{Style.RESET_ALL}")
+			
+			# Run simulation
+			sim.solve(Ibias_vals)
+		# Check which simulator is selected
+		if use_simulator == SIMULATOR_ABCDV1:
+			
+			# Specify simulator
+			sim = self.sim_abcdv1
+			logging.info(f"Beginning solve with simulator: {Fore.LIGHTBLUE_EX}{sim.NAME}{Style.RESET_ALL}")
+			
+			# Run simulation
+			sim.solve(Ibias_vals)
+		elif use_simulator == SIMULATOR_P0:
+			
+			# Specify simulator
+			sim = self.sim_p0
+			logging.info(f"Beginning solve with simulator: {Fore.LIGHTBLUE_EX}{sim.NAME}{Style.RESET_ALL}")
+			
+			# Run simulation
+			sim.solve(Ibias_vals)
+		elif use_simulator == SIMULATOR_HYBRID:
+			
+			# Specify simulator
+			sim = self.sim_hybrid
+			logging.info(f"Beginning solve with simulator: {Fore.LIGHTBLUE_EX}{sim.NAME}{Style.RESET_ALL}")
+			
+			# Run simulation
+			sim.solve(Ibias_vals)
+		else:
+			logging.warning("Unrecognized simulator selected.")
+	
+	def get_solution(self, parameter:str=None, simulator:int=None, conv_only:bool=True, element=None):
+		""" Returns solution data 
 		
-		logging.main(f"Configured system loss: {cspecial}[lf={rd(loss_Fund, 2)}, l2H={rd(loss_2H, 2)}, l3H={rd(loss_3H, 2)}]{standard_color}")
+		simulator: Which simulator to select solution data from. Defaults to that in master options (self.opt.simulator).
+		parameter: Parameter to extract as a numpy array. If is None, will return all data as general solution structs.
+		conv_only: Only include data points that did converge
+		element: If parameter is an array for each datapoint, element=None will return a 2D array (each array element is the pertinent array)
+				 or, if element is an integer, it will return that integer element of each solutoin's array. For example element=1 could pick
+				 out first harmonic data.
 		
-	def crunch(self, Iac:float, Idc:float, show_plot_td=False, show_plot_spec=False):
-		""" Using the provided Iac guess, find the reuslting solution, and the error
-		between the solution and the initial guess.
-		
-		Converts the resulting Iac time domain data into spectral components, saving the
-		fundamental through 3rd hamonic as a touple, with idx=0 assigned to fundamental.
 		"""
 		
-		# Update Iac in solution
-		self.soln.Iac = Iac
-		self.soln.Ibias = Idc
-		
-		# Solve for inductance (Lk)
-		if self.opt.use_Lk_expansion: 
-			# Use expansion for I=Idc+Iac*sin
+		# Auto-select simulator
+		use_simulator = self.opt.simulator
+		if simulator is not None:
 			
-			self.soln.Lk = self.L0 + self.L0/self.q**2 * ( Idc**2 + 2*Idc*Iac*np.sin(self.freq*2*PI*self.t) + Iac**2/2 - Iac**2/2*np.cos(2*self.freq*2*PI*self.t) ) 
-		else:
-			
-			# Calculate input current waveform
-			if (self.Itickle is not None) and (self.freq_tickle is not None):
-				Iin = Idc + Iac*np.sin(self.freq*2*PI*self.t) + self.Itickle*np.sin(self.freq_tickle*2*PI*self.t)
+			# Verify that a valid simulator was provided
+			if not self.validate_simulator_code(simulator):
+				logging.warning(f"Unrecognized simulator ID provided. Using default: {simcode_to_str(use_simulator)}")
 			else:
-				Iin = Idc + Iac*np.sin(self.freq*2*PI*self.t)
+				use_simulator = simulator
 		
-			# Calculate Lk
-			self.soln.Lk = self.L0 + self.L0/self.q**2 * Iin**2 
-			
-		self.soln.L_ = self.soln.Lk/self.l_phys
+		# Get full dataset
+		if use_simulator == SIMULATOR_ABCD:
+			soln = self.sim_abcd.get_solution()
+		elif use_simulator == SIMULATOR_ABCDV1:
+			soln = self.sim_abcdv1.get_solution()
+		elif use_simulator == SIMULATOR_P0:
+			soln = self.sim_p0.get_solution()
+		elif use_simulator == SIMULATOR_HYBRID:
+			soln = self.sim_hybrid.get_solution()
+		else:
+			logging.error("Failed to recognize simulator")
+			return None
 		
-		# # Update inductance estimate
-		# self.solve_inductance(Iac, Idc)
+		# If no parameter was requested, return the full dataset
+		if parameter is None:
+			return soln
 		
-		# Find Z0 of chip
-		self.soln.Vp = 1/np.sqrt(self.C_ * self.soln.L_)
-		self.soln.Zchip = np.sqrt(self.soln.L_ / self.C_)
-		
-		# Find electrical length of chip (from phase velocity)
-		self.soln.betaL = 2*PI*self.l_phys*self.freq*np.sqrt(self.C_ * self.soln.L_)
-		
-		# Find input impedance to chip
-		self.soln.Zin = xfmr(self.soln.Zchip, self.Zcable, self.soln.betaL)
-		
-		# Get real and imag components of Zin
-		Rin = np.real(self.soln.Zin)
-		Xin = np.imag(self.soln.Zin)
-		
-		# Find angle of Zin
-		self.theta = np.angle(self.soln.Zin)
-		
-		# Calcualte transmitted power (to chip)
-		self.soln.P0 = np.abs(self.Vgen)**2 * Rin * 0.5 / ((Rin + self.Rsrc)**2 + (Xin + self.Xsrc)**2)
-		
-		# Find resulting Iac and error
-		logging.warning(f"{Fore.RED}ERROR: Power calculation ignored higher order terms.{standard_color}")
-		self.soln.Iac_result_rms = np.sqrt(2*self.soln.P0/np.cos(self.theta)/self.soln.Zin)
-		self.soln.Iac_result_td = np.sqrt(2)*self.soln.Iac_result_rms*np.sin(2*PI*self.freq*self.t) #TODO: Need a factor of sqrt(2)
-		# err_list = np.abs(self.soln.Iac_result_rms - self.soln.Iac) # Error in signal *amplitude* at each time point
-		# self.soln.rmse = np.sqrt(np.mean(err_list**2))
-		
-		# # Save to logger
-		# logging.debug(f"Solution error: {round(self.soln.rmse*1000)/1000}")
-		#TODO: This error is never used - Populate self.soln.rmse correctly!
-		
-		if show_plot_td:
-			plot_Ts = 5
-			idx_end = find_nearest(self.t, plot_Ts/self.freq)
-			
-			plt.plot(self.t*1e9, self.soln.Iac_result_td*1e3)
-			plt.xlabel("Time (ns)")
-			plt.ylabel("AC Current (mA)")
-			plt.title("Solution Iteration Time Domain Plot")
-			plt.show()
-			
-			# plt.plot(self.t[:idx_end]*1e9, self.soln.Lk[:idx_end]*1e9)
-			# plt.xlabel("Time (ns)")
-			# plt.ylabel("Lk (nH)")
-			# plt.title("Solution Iteration Time Domain Plot")
-			# plt.grid()
-			# plt.show()
-		
-		############# Previously called get_spec_components() ###########
-		
-		y = self.soln.Iac_result_td
-		num_pts = len(self.soln.Iac_result_td)
-		dt = self.t[1]-self.t[0]
-		
-		# Run FFT
-		spec_raw = fft(y)[:num_pts//2]
-		
-		# Fix magnitude to compensate for number of points
-		spec = 2.0/num_pts*np.abs(spec_raw)
-		self.soln.spec = spec
-		
-		# Get corresponding x axis (frequencies)
-		spec_freqs = fftfreq(num_pts, dt)[:num_pts//2]
-		self.soln.spec_freqs = spec_freqs
-		
-		if self.opt.use_interp:
-			logging.warning("interp feature has not been implemented. See fft_demo.py to see how.")
-		
-		# Find index of peak - Fundamental
-		idx = find_nearest(spec_freqs, self.freq)
-		try:
-			Iac_fund = np.max([ spec[idx-1], spec[idx], spec[idx+1] ])
-		except:
-			logging.warning("Spectrum selected edge-element for fundamental")
-			Iac_fund = spec[idx]
-			
-		# Find index of peak - Fundamental
-		idx = find_nearest(spec_freqs, self.freq*2)
-		try:
-			Iac_2H = np.max([ spec[idx-1], spec[idx], spec[idx+1] ])
-		except:
-			logging.warning("Spectrum selected edge-element for 2nd Harmonic")
-			Iac_2H = spec[idx]
-			
-		# Find index of peak - Fundamental
-		idx = find_nearest(spec_freqs, self.freq*3)
-		try:
-			Iac_3H = np.max([ spec[idx-1], spec[idx], spec[idx+1] ])
-		except:
-			logging.warning("Spectrum selected edge-element for 3rd Harmonic")
-			Iac_3H = spec[idx]
-			show_plot_spec = True
-			
-		# Apply system loss
-		if self.opt.use_S21_loss and self.system_loss is not None:
-			Iac_fund *= self.system_loss[0]
-			Iac_2H *= self.system_loss[1]
-			Iac_3H *= self.system_loss[2]
-		
-		# Save to solution set
-		self.soln.Iac_result_spec = (Iac_fund, Iac_2H, Iac_3H)
-		
-		logging.debug(f"Calcualted Iac spectral components: fund={rd(Iac_fund*1e6, 3)}, 2H={rd(Iac_2H*1e6, 3)}, 3H={rd(Iac_3H*1e6, 3)} uA")
-		
-		if show_plot_spec:
-			
-			plt.plot(spec_freqs/1e9, spec*1e3)
-			plt.xlabel("Frequency (GHz)")
-			plt.ylabel("AC Current (mA)")
-			plt.title("Solution Iteration Spectrum")
-			
-			plt.show()
-		
-	def plot_solution(self, s:LKSolution=None):
-		
-		# Pick last solution if none provided
-		if s is None:
-			s = self.soln
-		
-		# calculate end index
-		plot_Ts = 5
-		idx_end = find_nearest(self.t, plot_Ts/self.freq)
-		
-		# Create time domain figure
-		plt.figure(1)
-		plt.plot(self.t[:idx_end]*1e9, np.real(s.Iac_result_td[:idx_end])*1e3, '-b')
-		plt.plot(self.t[:idx_end]*1e9, np.abs(s.Iac_result_td[:idx_end])*1e3, '-r')
-		plt.plot(self.t[:idx_end]*1e9, np.sqrt(2)*np.abs(s.Iac_result_rms[:idx_end])*1e3, '-g')
-		plt.xlabel("Time (ns)")
-		plt.ylabel("AC Current (mA)")
-		plt.title(f"Time Domain Data, Idc = {rd(s.Ibias*1e3)} mA")
-		plt.legend(["TD Real", "TD Abs.", "|Amplitude|"])
-		plt.grid()
-		
-		# Create spectrum figure
-		plt.figure(2)
-		plt.semilogy(s.spec_freqs/1e9, s.spec*1e3)
-		plt.xlabel("Frequency (GHz)")
-		plt.ylabel("AC Current (mA)")
-		plt.title(f"Current Spectrum, Idc = {rd(s.Ibias*1e3)} mA")
-		plt.xlim((0, self.freq*5/1e9))
-		plt.grid()
-		
-		plt.show()
+		# Return extracted parameter
+		return soln_extract(soln, parameter, conv_only=conv_only, element=element)
 	
-	def solve(self, Ibias_vals:list, show_plot_on_conv=False):
-		""" Takes a list of bias values, plugs them in for Idc, and solves for
-		the AC current s.t. error is within tolerance. """
+	def calculate(self, parameter:str=None, simulator:int=None, conv_only:bool=True, param2=None):
+		""" Calculates a parameter from solution data. This differs from 'get_solution()' in that
+		it is not just reporting solution from one of the simulators, but performs calculations on that data.
+		"""
 		
-		logging.info(f"Beginning iterative solve for {cspecial}{len(Ibias_vals)}{standard_color} bias points.")
+		# Check which parameter is requested
+		if parameter == LKSystem.CPARAM_CONVERSION_EFFIC1: # Conversion efficiency
+			
+			# Calulate input power at fundamental
+			Iin_w = self.get_solution(simulator=simulator, parameter='Iac_g', conv_only=conv_only, element=0)
+			Vin_w = self.get_solution(simulator=simulator, parameter='Vgen_c', conv_only=conv_only, element=0)
+			Pin_w = Iin_w*Vin_w
+			
+			# Calculate output power at 2nd Harmonic
+			IL_w = self.get_solution(simulator=simulator, parameter='IL_w', conv_only=conv_only, element=1)
+			VL_w = self.get_solution(simulator=simulator, parameter='VL_w', conv_only=conv_only, element=1)
+			PL_w = IL_w*VL_w
+						
+			# Conversion efficiency
+			return PL_w/Pin_w*100
+		elif parameter == LKSystem.CPARAM_CONVERSION_EFFIC2: # Conversion efficiency
+						
+			# Calculate total power at load
+			Pin_w = self.calculate(parameter=LKSystem.CPARAM_TOTAL_LOAD_POWER, simulator=simulator, conv_only=conv_only)
+			
+			# Calculate power at load at 2nd harmonic
+			IL_w = self.get_solution(simulator=simulator, parameter='IL_w', conv_only=conv_only, element=1)
+			VL_w = self.get_solution(simulator=simulator, parameter='VL_w', conv_only=conv_only, element=1)
+			PL_w = IL_w*VL_w
+						
+			# Conversion efficiency
+			return PL_w/Pin_w*100
 		
-		Iac_crude_guess = np.abs(self.Vgen)**2 / 50 # Crude guess for AC current (Assume 50 ohm looking into chip)
+		elif parameter == LKSystem.CPARAM_TOTAL_LOAD_POWER: # Conversion efficiency
+			
+			# Calculate total power at load
+			Pin_w = 0
+			for hi in range(5): #TODO: Sense total number of stored harmonics
+				IL_w = self.get_solution(simulator=simulator, parameter='IL_w', conv_only=conv_only, element=hi)
+				VL_w = self.get_solution(simulator=simulator, parameter='VL_w', conv_only=conv_only, element=hi)
+				Pin_w += IL_w*VL_w
+			
+			return Pin_w
 		
-		# Scan over each bias value
-		for Idc in Ibias_vals:
+		elif parameter == LKSystem.CPARAM_HARM_LOAD_POWER: # Conversion efficiency
 			
-			last_sign = None # Sign of last change
-			self.soln.num_iter = 0	# Reset iteration counter
-			guess_coef = self.opt.guess_update_coef # Reset guess_coef
+			if param2 is None:
+				logging.error("CPARAM_HARM_LOAD_POWER requires param2 to specify harmonic index. (1=fund, 2=2nd, etc.)")
+				return None
+			param2 = int(param2) - 1
 			
-			if self.opt.start_guess_method == GUESS_ZERO_REFLECTION:
-				Iac_guess = Iac_crude_guess
-			elif self.opt.start_guess_method == GUESS_USE_LAST:
-				if len(self.solution) > 0:
-					Iac_guess = self.solution[-1].Iac
-				else:
-					Iac_guess = Iac_crude_guess
+			# Calculate output power at 2nd Harmonic
+			IL_w = self.get_solution(simulator=simulator, parameter='IL_w', conv_only=conv_only, element=param2)
+			VL_w = self.get_solution(simulator=simulator, parameter='VL_w', conv_only=conv_only, element=param2)
+			PL_w = IL_w*VL_w
 			
-			# Loop until converge
-			while True:
-				
-				# Crunch the numbers of this guess value
-				self.crunch(Iac_guess, Idc)
-				self.soln.num_iter += 1
-				
-				# Calculate signed error
-				error = self.soln.Iac_result_spec[0] - Iac_guess
-				error_pcnt = (np.max([self.soln.Iac_result_spec[0], Iac_guess])/np.min([self.soln.Iac_result_spec[0], Iac_guess])-1)*100
-				
-				# Check for convergence
-				if error_pcnt < self.opt.tol_pcnt:
-					
-					# Add to logger
-					logging.info(f"Datapoint ({cspecial}Idc={rd(Idc*1e3)} mA{standard_color}),({cspecial}Iac={rd(Iac_guess*1e3, 3)} mA{standard_color}) converged with {cspecial}error={rd(error_pcnt, 3)}%{standard_color} after {cspecial}{self.soln.num_iter}{standard_color} iterations ")
-					
-					# Create deep
-					new_soln = copy.deepcopy(self.soln)
-					new_soln.convergence_failure = False
-					
-					if self.opt.remove_td:
-						new_soln.Lk = []
-						new_soln.Vp = []
-						new_soln.betaL = []
-						new_soln.Zchip = []
-						new_soln.L_ = []
-						new_soln.P0 = []
-						new_soln.theta = []
-						new_soln.Zin = []
-						new_soln.Iac_result_rms = []
-						new_soln.Iac_result_td = []
-					
-					# Add solution to list
-					self.solution.append(new_soln)
-					
-					# Add bias point to list
-					self.bias_points.append(Idc)
-					
-					# Plot result if requested
-					if show_plot_on_conv:
-						self.plot_solution()
-					
-					# Exit convergence loop
-					break
-					
-				# Check for exceed max iterations
-				elif self.soln.num_iter >= self.opt.max_iter:
-					
-					# Add to logger
-					logging.warning(f"Failed to converge for point ({cspecial}Idc={rd(Idc*1e3)} mA{standard_color}).")
-					
-					# Exit convergence loop
-					break
-				
-				# Else update guess
-				else:
-					
-					# Error is positive
-					if error > 0:
-						
-						# First iteration - set sign
-						if last_sign is None:
-							last_sign = np.sign(error)
-						# Last change was in different direction
-						elif last_sign < 1:
-							guess_coef *= self.opt.ceof_shrink_factor # Change update size
-							last_sign = -1 # Update change direction
-							logging.debug(f"Error sign changed. Changing guess update coefficient to {cspecial}{guess_coef}{standard_color}")
-						
-						# Update guess
-						Iac_guess = Iac_guess + error * guess_coef
-					
-					# Else error is negative
-					else:
-						
-						# First iteration - set sign
-						if last_sign is None:
-							last_sign = np.sign(error)
-						# Last change was in different direction
-						elif last_sign > 1:
-							guess_coef *= self.opt.ceof_shrink_factor # Change update size
-							last_sign = 1 # Update change direction
-							logging.debug(f"Error sign changed. Changing guess update coefficient to {cspecial}{guess_coef}{standard_color}")
-							
-						# Update guess
-						Iac_guess = Iac_guess + error * guess_coef
-					
-					logging.debug(f"Last guess produced {cspecial}error={error}{standard_color}. Updated guess to {cspecial}Iac={Iac_guess}{standard_color}. [{cspecial}iter={self.soln.num_iter}{standard_color}]")
+			return PL_w
+		else:
+			logging.error(f"Unrecognized parameter code: {parameter}. Aborting.")
+			
