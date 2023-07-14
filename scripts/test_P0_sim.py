@@ -1,4 +1,4 @@
-from core import *
+from Lkpy.core import *
 
 ################ These are the original values used in P0-branch #############
 

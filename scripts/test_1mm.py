@@ -1,4 +1,4 @@
-from core import *
+from Lkpy.core import *
 
 ############################### CONFIGURE SYSTEM PARAMETERS ##################
 
