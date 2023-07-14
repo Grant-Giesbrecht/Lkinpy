@@ -1,14 +1,14 @@
 from colorama import Fore, Style
-from base import *
+from .base import *
 
 import logging
 import getopt, sys
 import git
 
-from Simulator_ABCD import *
-from Simulator_ABCDv1 import *
-from Simulator_P0 import *
-from Simulator_Hybrid import *
+from .Simulator_ABCD import *
+from .Simulator_ABCDv1 import *
+from .Simulator_P0 import *
+from .Simulator_Hybrid import *
 
 addLoggingLevel('MAIN', logging.INFO + 5)
 
@@ -41,10 +41,10 @@ for opt, aarg in opts:
 logging.basicConfig(format=f'{prime_color}%(levelname)s:{standard_color} %(message)s{quiet_color} | %(asctime)s{Style.RESET_ALL}', level=LOG_LEVEL)
 
 #print git version
-repo = git.Repo(search_parent_directories=True)
-sha = repo.head.object.hexsha
-sha_short = sha[:12]
-logging.info(f"Initializing simulator. {Fore.LIGHTBLACK_EX}[Active Branch: {Fore.LIGHTBLUE_EX}{repo.active_branch}{Fore.LIGHTBLACK_EX}, commit={Fore.LIGHTBLUE_EX}0x{sha_short}{Fore.LIGHTBLACK_EX}]{Style.RESET_ALL}")
+# repo = git.Repo(search_parent_directories=True)
+# sha = repo.head.object.hexsha
+# sha_short = sha[:12]
+# logging.info(f"Initializing simulator. {Fore.LIGHTBLACK_EX}[Active Branch: {Fore.LIGHTBLUE_EX}{repo.active_branch}{Fore.LIGHTBLACK_EX}, commit={Fore.LIGHTBLUE_EX}0x{sha_short}{Fore.LIGHTBLACK_EX}]{Style.RESET_ALL}")
 
 
 class Simopt:

@@ -1,11 +1,11 @@
-from base import *
+from .base import *
 
 import copy
 from scipy.fft import fft, fftfreq
 import pickle
 
-from Simulator_ABCD import *
-from Simulator_P0 import *
+from .Simulator_ABCD import *
+from .Simulator_P0 import *
 
 @dataclass
 class SimoptHybrid:

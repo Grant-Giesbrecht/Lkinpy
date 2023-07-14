@@ -1,11 +1,11 @@
-from base import *
+from .base import *
 
 import copy
 from scipy.fft import fft, fftfreq
 import pickle
 
 @dataclass
-class SimoptABCDv1:
+class SimoptABCD:
 	""" Contains simulation options"""
 	
 	# Simulation options
@@ -21,8 +21,8 @@ class SimoptABCDv1:
 	max_iter = 1000 # Max iterations for convergence
 	tol_pcnt = 1 # Tolerance in percent between Iac guesses
 	tol_abs = 0.1e-3 # Tolerance in mA between Iac guesses
-	guess_update_coef = 0.5 # Fraction by which to compromise between guess and result Iac (0=remain at guess, 1=use result; 0.5 recommended)
-	ceof_shrink_factor = 0.2 # Fraction by which to modify guess_update_coef when sign reverses (good starting point: 0.2)
+	guess_update_coef = 0.1 # Fraction by which to compromise between guess and result Iac (0=remain at guess, 1=use result; 0.5 recommended)
+	ceof_shrink_factor = 0.5 # Fraction by which to modify guess_update_coef when sign reverses (good starting point: 0.2)
 	
 	# How to pick initial Iac guess
 	start_guess_method = GUESS_ZERO_REFLECTION
@@ -31,7 +31,7 @@ class SimoptABCDv1:
 	remove_td = False # Prevents all time domain data from being saved in solution data to save space
 	
 @dataclass
-class LKSolutionABCDv1:
+class LKSolutionABCD:
 	""" Contains data to represent a solution to the LKsystem problem
 	
 	Nomenclature:
@@ -76,18 +76,18 @@ class LKSolutionABCDv1:
 	error_history = None # List of all error values during converge
 	error_history_pcnt = None # List of all error values during converge
 
-class LKSimABCDv1:
+class LKSimABCD:
 	""" This class represents a solution to the nonlinear chip system, give a set of input conditions (things
 	like actual chip length, input power, etc)."""
 	
 	# Name of simulator
-	NAME = "Simulator_ABCDv1"
+	NAME = "Simulator_ABCD"
 	
 	def __init__(self, master_sim):
 		""" Initialize system with given conditions """
 		
 		# Simulations options
-		self.opt = SimoptABCDv1()
+		self.opt = SimoptABCD()
 
 		# System Settings
 		self.Pgen = master_sim.Pgen
@@ -113,7 +113,7 @@ class LKSimABCDv1:
 		self.t = master_sim.t
 
 		# Create solution object
-		self.soln = LKSolutionABCDv1() # Current solution data
+		self.soln = LKSolutionABCD() # Current solution data
 		
 		self.solution = [] # List of solution data
 		self.bias_points = [] # List of bias values corresponding to solution data
@@ -263,8 +263,8 @@ class LKSimABCDv1:
 			
 			# Apply system loss
 			if (self.opt.use_S21_loss) and (self.system_loss is not None):
-				# Iac_hx *= 1 - loss_frac*(1 - self.system_loss[h_idx])
-				Iac_hx *= self.system_loss[h_idx]
+				logging.error("Need to apply system loss to power, not LK!!!")
+				Iac_hx *= 1 - loss_frac*(1 - self.system_loss[h_idx])
 		
 			# Save to solution set
 			spectrum.append(abs(Iac_hx))
@@ -319,7 +319,7 @@ class LKSimABCDv1:
 		
 		self.soln.L_td = Lk/self.l_phys
 		
-		# print(f"Lk = {(np.mean(self.soln.L_td))}, stdev={(np.std(self.soln.L_td))}")
+		print(f"Lk = {(np.mean(self.soln.L_td))}, stdev={(np.std(self.soln.L_td))}")
 		
 		# Find Z0 of chip
 		self.soln.Z0_td = np.sqrt(self.soln.L_td/self.C_)
@@ -327,8 +327,8 @@ class LKSimABCDv1:
 		# Find electrical length of chip (from phase velocity)
 		self.soln.betaL_td = 2*PI*self.l_phys*self.freq*np.sqrt(self.C_ * self.soln.L_td)
 		
-		# print(f"Z0 = {(np.mean(self.soln.Z0_td))}, stdev={(np.std(self.soln.L_td))}")
-		# print(f"theta = {(np.mean(self.soln.betaL_td))}, stdev={(np.std(self.soln.L_td))}")
+		print(f"Z0 = {(np.mean(self.soln.Z0_td))}, stdev={(np.std(self.soln.L_td))}")
+		print(f"theta = {(np.mean(self.soln.betaL_td))}, stdev={(np.std(self.soln.L_td))}")
 		
 		# Define ABCD method s.t. calculate current at VNA
 		meas_frac = 1 #Fractional distance from gen towards load at which to meas. Vx and Ix
@@ -336,25 +336,25 @@ class LKSimABCDv1:
 		thetaB_td = self.soln.betaL_td*(1-meas_frac) # = 0
 		j = complex(0, 1)
 		
-		# print(f"thetaA = {(np.mean(thetaA_td))}, stdev={(np.std(thetaA_td))}")
-		# print(f"thetaB = {(np.mean(thetaB_td))}, stdev={(np.std(thetaB_td))}")
+		print(f"thetaA = {(np.mean(thetaA_td))}, stdev={(np.std(thetaA_td))}")
+		print(f"thetaB = {(np.mean(thetaB_td))}, stdev={(np.std(thetaB_td))}")
 		
 		# Solve for IL (Eq. 33,4 in Notebook TAE-33)
 		M = (self.ZL*np.cos(thetaB_td) + j*self.soln.Z0_td*np.sin(thetaB_td)) * ( np.cos(thetaA_td) + j*self.Zg/self.soln.Z0_td*np.sin(thetaA_td))
 		N = ( self.ZL*j/self.soln.Z0_td*np.sin(thetaB_td) + np.cos(thetaB_td) ) * ( j*self.soln.Z0_td*np.sin(thetaA_td) + self.Zg*np.cos(thetaA_td) )
 		
-		# print(f"M = {(np.mean(M))}, stdev={(np.std(M))}")
-		# print(f"N = {(np.mean(N))}, stdev={(np.std(N))}")
+		print(f"M = {(np.mean(M))}, stdev={(np.std(M))}")
+		print(f"N = {(np.mean(N))}, stdev={(np.std(N))}")
 		
 		IL_t = self.Vgen/(M+N)
 		Vx_t = IL_t*self.ZL*np.cos(thetaB_td) + IL_t*j*self.soln.Z0_td*np.sin(thetaB_td)
 		Ix_t = IL_t*self.ZL*j/self.soln.Z0_td*np.sin(thetaB_td) + IL_t*np.cos(thetaB_td)
 		Ig_t = Vx_t*j/self.soln.Z0_td*np.sin(thetaA_td) + Ix_t*np.cos(thetaA_td)
 		
-		# print(f"IL_t = {(np.mean(IL_t))}, stdev={(np.std(IL_t))}")
-		# print(f"Vx_t = {(np.mean(Vx_t))}, stdev={(np.std(Vx_t))}")
-		# print(f"Ix_t = {(np.mean(Ix_t))}, stdev={(np.std(Ix_t))}")
-		# print(f"Ig_t = {(np.mean(Ig_t))}, stdev={(np.std(Ig_t))}")
+		print(f"IL_t = {(np.mean(IL_t))}, stdev={(np.std(IL_t))}")
+		print(f"Vx_t = {(np.mean(Vx_t))}, stdev={(np.std(Vx_t))}")
+		print(f"Ix_t = {(np.mean(Ix_t))}, stdev={(np.std(Ix_t))}")
+		print(f"Ig_t = {(np.mean(Ig_t))}, stdev={(np.std(Ig_t))}")
 		
 		#----------------------- CALCULATE SPECTRAL COMPONENTS OF V and I --------------------
 		
@@ -363,20 +363,20 @@ class LKSimABCDv1:
 		IL_tuple = self.fourier(IL_t, loss_frac=1, plot_result=do_plot)
 		IL = IL_tuple[2]
 		
-		# print("IL Spectrum:")
+		print("IL Spectrum:")
 		f = IL_tuple[3]
 		s = IL_tuple[2]
-		# print(f"\tFreqs: {f}")
-		# print(f"\tSpec: {s}")
+		print(f"\tFreqs: {f}")
+		print(f"\tSpec: {s}")
 		
 		Vx_tuple = self.fourier(Vx_t, loss_frac=meas_frac, plot_result=do_plot)
 		Vx = Vx_tuple[2]
 		
-		# print("Vx Spectrum:")
+		print("Vx Spectrum:")
 		f = Vx_tuple[3]
 		s = Vx_tuple[2]
-		# print(f"\tFreqs: {f}")
-		# print(f"\tSpec: {s}")
+		print(f"\tFreqs: {f}")
+		print(f"\tSpec: {s}")
 		
 		Ix_tuple = self.fourier(Ix_t, loss_frac=meas_frac, plot_result=do_plot)
 		Ix = Ix_tuple[2]
@@ -396,7 +396,7 @@ class LKSimABCDv1:
 		self.soln.freq_w = Ix_tuple[3]
 		self.soln.freq_wf = Ix_tuple[1]
 		
-	def plot_solution(self, s:LKSolutionABCDv1=None):
+	def plot_solution(self, s:LKSolutionABCD=None):
 				
 		# Pick last solution if none provided
 		if s is None:
@@ -481,7 +481,7 @@ class LKSimABCDv1:
 				Iac_guess = Iac_crude_guess
 			elif self.opt.start_guess_method == GUESS_USE_LAST:
 				if len(self.solution) > 0:
-					Iac_guess = self.solution[-1].Iac_g
+					Iac_guess = self.solution[-1].Iac
 				else:
 					Iac_guess = Iac_crude_guess
 				
@@ -498,10 +498,10 @@ class LKSimABCDv1:
 				
 				# Calculate signed error, check if convergence conditions met
 				# error = self.soln.Ig_w[0] + self.soln.Ig_w[1] + self.soln.Ig_w[2] - Iac_guess
-				error = self.soln.Ig_w[0] - Iac_guess
-				denom = np.min([self.soln.Ig_w[0], Iac_guess])
+				error = self.soln.Ig_w[1] - Iac_guess
+				denom = np.min([self.soln.Ig_w[1], Iac_guess])
 				if denom != 0:
-					error_pcnt = (np.max([self.soln.Ig_w[0], Iac_guess])/denom-1)*100
+					error_pcnt = (np.max([self.soln.Ig_w[1], Iac_guess])/denom-1)*100
 					did_converge = (error_pcnt < self.opt.tol_pcnt) and ( abs(error) < self.opt.tol_abs )
 				else:
 					error_pcnt = None
@@ -536,6 +536,18 @@ class LKSimABCDv1:
 						label_color = Fore.LIGHTBLUE_EX
 						if new_soln.Iac_g < 1e-3:
 							label_color = Fore.RED
+						
+						# print(f"{label_color}Solution:{Style.RESET_ALL}")
+						# print(f"{label_color}\tharms:{Style.RESET_ALL} {rdl(new_soln.harms)}")
+						# print(f"{label_color}\tZ0 (ohm)):{Style.RESET_ALL} {rdl(new_soln.spec_Z0)}")
+						# print(f"{label_color}\tsqL (ohms):{Style.RESET_ALL} {rdl(new_soln.spec_sqL)}")
+						# print(f"{label_color}\tbetaL (deg):{Style.RESET_ALL} {rdl(new_soln.spec_betaL)}")
+						# print(f"{label_color}\tIL (mA):{Style.RESET_ALL} {rdl(new_soln.IL_w*1e3)}")
+						# print(f"{label_color}\tIx (mA):{Style.RESET_ALL} {rdl(new_soln.Ix_w*1e3)}")
+						# print(f"{label_color}\tIg (mA):{Style.RESET_ALL} {rdl(new_soln.Ig_w*1e3)}")
+						
+						# if new_soln.Iac < 1e-3:
+						# 	self.plot_solution(new_soln)
 					
 					# Add solution to list
 					self.solution.append(new_soln)
@@ -594,9 +606,8 @@ class LKSimABCDv1:
 							last_sign = np.sign(error)
 						# Last change was in different direction
 						elif last_sign < 0:
-							guess_coef_old = guess_coef
 							guess_coef *= self.opt.ceof_shrink_factor # Change update size
-							logging.info(f"iter: {self.soln.num_iter} Changing guess coef from {rd(guess_coef_old*1e5)}e-5 to {rd(guess_coef*1e5)}e-5. Shrink factor: {rd(self.opt.ceof_shrink_factor)}")
+							logging.info(f"iter: {self.soln.num_iter} Changing guess coef from {rd(guess_coef*1e5)}e-5 to {rd(guess_coef*1e5)}e-5. Shrink factor: {rd(self.opt.ceof_shrink_factor)}")
 							last_sign = 1 # Update change direction
 							logging.debug(f"Error sign changed. Changing guess update coefficient to {cspecial}{guess_coef}{standard_color}")
 						
@@ -642,7 +653,7 @@ class LKSimABCDv1:
 			ns.IL_w = s.IL_w
 			ns.IL_wf = []
 			
-			ns.VL_w = s.IL_w*self.ZL
+			ns.VL_w = []
 			ns.VL_wf = []
 			
 			ns.freq_w = s.freq_w
