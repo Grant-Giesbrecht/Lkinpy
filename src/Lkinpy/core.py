@@ -10,7 +10,7 @@ from .Simulator_ABCDv1 import *
 from .Simulator_P0 import *
 from .Simulator_Hybrid import *
 
-addLoggingLevel('MAIN', logging.INFO + 5)
+addLoggingLevel('INFO', logging.INFO + 5)
 
 LOG_LEVEL = logging.WARNING
 
