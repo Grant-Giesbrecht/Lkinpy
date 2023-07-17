@@ -316,9 +316,10 @@ class LKSimABCD:
 		else:
 			Iin_td = Idc + Iac*np.sin(self.freq*2*PI*self.t)
 	
-		# Calculate Lk
+		# Calculate Lkinetic
 		Lk = self.L0 + self.L0/(self.q**2) * (Iin_td**2)
 		
+		# Calculate inductance per unit length
 		self.soln.L_td = Lk/self.l_phys
 		
 		# print(f"Lk = {(np.mean(self.soln.L_td))}, stdev={(np.std(self.soln.L_td))}")
